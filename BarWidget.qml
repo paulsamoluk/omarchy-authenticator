@@ -158,6 +158,12 @@ BarWidget {
     unlocked = false
     accounts = []
     lockError = ""
+    idleLock.stop()
+    lockNowProc.running = true
+  }
+
+  function resetAuthenticator() {
+    resetProc.running = true
   }
 
   function refreshLockState() {
@@ -197,13 +203,17 @@ BarWidget {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        var state = {}
         try {
-          root.lockConfigured = JSON.parse(String(text || "{}")).configured === true
+          state = JSON.parse(String(text || "{}"))
         } catch (e) {
-          root.lockConfigured = false
+          state = {}
         }
-        if (!root.lockConfigured) root.unlocked = true
+        root.lockConfigured = state.configured === true
         root.lockKnown = true
+        // An open session key survives a shell restart, so a login only asks
+        // once even if the shell itself is restarted.
+        root.unlocked = state.unlocked === true || !root.lockConfigured
         root.refresh()
       }
     }
@@ -211,7 +221,7 @@ BarWidget {
 
   Process {
     id: verifyProc
-    command: [helperPath, "lock", "verify"]
+    command: [helperPath, "lock", "unlock"]
     property string inputText: ""
     stdinEnabled: true
     stderr: StdioCollector { waitForEnd: true }
@@ -262,6 +272,25 @@ BarWidget {
       } else {
         root.lockError = "Wrong password"
       }
+    }
+  }
+
+  Process {
+    id: lockNowProc
+    command: [helperPath, "lock", "now"]
+    onExited: root.refreshLockState()
+  }
+
+  Process {
+    id: resetProc
+    command: [helperPath, "lock", "reset", "--yes"]
+    stderr: StdioCollector { waitForEnd: true }
+    onExited: {
+      root.unlocked = true
+      root.lockConfigured = false
+      root.lockError = ""
+      root.accounts = []
+      root.refreshLockState()
     }
   }
 

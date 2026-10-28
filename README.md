@@ -109,28 +109,34 @@ stepping once per second.
 ## Master password
 
 Optional, off by default. Set it in the panel — the padlock button in the
-toolbar — and the codes stay hidden behind one password entry per session:
+toolbar — and every secret moves into an **encrypted vault**
+(`vault.gpg`, AES-256, GPG symmetric, passphrase never in argv) and out of the
+login keyring. From then on:
 
-- The prompt appears the **first time you open the panel in a shell session**;
-  unlocking holds for the rest of that session.
+- The password is asked **once per login**; unlocking opens a session key in
+  `$XDG_RUNTIME_DIR/psamoluk.totp/session` (mode 0600, tmpfs, gone on logout) so
+  the helper keeps working without asking again.
 - It **re-locks after 15 minutes without use** (`lockMinutes` on the widget's
-  `shell.json` entry changes that), and "Lock now" in the same card locks it
-  immediately.
-- While locked the widget generates no codes at all — the helper is not asked
-  for them.
-- Forgotten it? `rm ~/.local/share/psamoluk.totp/lock.json` clears the gate.
-  That is also why this is a **screen lock, not encryption**: the secrets stay
-  in your login keyring, and anything that can read the keyring (your shell,
-  `bin/otp list`) can still read them. What it stops is someone walking up to
-  your unlocked desktop and reading codes off the panel.
-- The password is stored as PBKDF2-SHA256 (300k iterations, random salt) in
-  `~/.local/share/psamoluk.totp/lock.json`, mode 0600, never in argv.
+  `shell.json` entry changes that), and **Lock now** drops the session key
+  immediately. While locked the helper refuses to produce a code at all.
+- **There is no recovery.** The secrets are encrypted with that password, so
+  forgetting it means there is nothing to decrypt: the only way forward is
+  **Reset**, which deletes the vault and every account in it. Deleting files by
+  hand gains nothing either — the vault stays unreadable and the keyring copy is
+  gone.
+- Removing the password (padlock card → Remove) unwraps the vault back into the
+  login keyring, which needs the open session, not a re-typed password.
+- An install from before the vault existed upgrades itself: the first unlock
+  with the old password verifies it, writes the vault and clears the keyring
+  copy in one step, keeping the same password and the same codes.
 
 ## Where the secrets live
 
-- **Login keyring by default** (`secret-tool`, service `psamoluk.totp`, one item
-  per account, labelled `omarchy-totp: <account>`). The item is cleared when you
-  remove the account.
+- **Encrypted vault** once a master password is set: `~/.local/share/psamoluk.totp/vault.gpg`,
+  AES-256 via GPG symmetric, one blob for every secret.
+- **Login keyring when no password is set** (`secret-tool`, service
+  `psamoluk.totp`, one item per account, labelled `omarchy-totp: <account>`).
+  The item is cleared when you remove the account.
 - `~/.local/share/psamoluk.totp/accounts.json` holds **metadata only** — labels,
   issuer, digits, period, algorithm — `0600`, no secrets, no codes.
 - If no keyring backend answers (locked keyring, no D-Bus, no `secret-tool`), the

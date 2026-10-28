@@ -16,7 +16,12 @@ Commands
   add-qr [PATH|--clipboard]     read the otpauth:// URI out of a QR screenshot
   remove NAME|--id ID
   copy NAME|--id ID             copy the current code (60 s auto-clear)
-  lock status|set|verify|clear  master password gate (password on stdin)
+  lock status                   {"configured", "vault", "unlocked"}
+  lock set                      encrypt every secret under a master password
+  lock unlock                   verify + open the session (password on stdin)
+  lock now                      drop the session key (lock immediately)
+  lock clear                    remove the password, secrets back to the keyring
+  lock reset --yes              destroy the vault and every account
   check                         backend + account count
 """
 
@@ -36,7 +41,10 @@ from pathlib import Path
 
 DATA_DIR = Path(os.environ.get("TOTP_DATA_DIR") or (Path.home() / ".local/share/psamoluk.totp"))
 INDEX = DATA_DIR / "accounts.json"
-LOCK = DATA_DIR / "lock.json"
+LOCK = DATA_DIR / "lock.json"          # legacy password gate (pre-vault installs)
+VAULT = DATA_DIR / "vault.gpg"         # secrets, encrypted with the master password
+SESSION_DIR = Path(os.environ.get("XDG_RUNTIME_DIR") or "/run/user/%d" % os.getuid()) / "psamoluk.totp"
+SESSION = SESSION_DIR / "session"
 LOCK_ITERATIONS = 300_000
 SERVICE = "psamoluk.totp"
 KEYRING_LABEL = "omarchy-totp"
@@ -105,6 +113,8 @@ def keyring_available():
 
 
 def secret_for(account):
+    if VAULT.exists():
+        return vault_read(require_session())["secrets"].get(account["id"])
     if account.get("store") == "file":
         return account.get("secret")
     try:
@@ -119,6 +129,14 @@ def secret_for(account):
 
 def secret_set(account, secret, data):
     """Store the secret where the account says; drop the file copy if unused."""
+    if VAULT.exists():
+        password = require_session()
+        vault = vault_read(password)
+        vault["secrets"][account["id"]] = secret
+        vault_write(password, vault)
+        account["store"] = "vault"
+        account.pop("secret", None)
+        return True
     if data.get("backend") == "keyring" and keyring_available():
         proc = _secret_tool(
             "store",
@@ -139,7 +157,49 @@ def secret_set(account, secret, data):
     return True
 
 
+def keyring_secret_del(account):
+    """Drop the pre-vault copy only (keyring item or inline field)."""
+    if account.get("store") == "keyring":
+        _secret_tool("clear", "service", SERVICE, "account", account["id"])
+    account.pop("secret", None)
+
+
+def migrate_to_vault(password):
+    """One-time upgrade: legacy password gate -> encrypted vault.
+
+    Runs on the unlock that verifies the legacy password, so an existing
+    install lands on encryption without being asked to set a new password.
+    """
+    data = load_index()
+    vault = {"version": 1, "secrets": {}}
+    for account in data["accounts"]:
+        secret = account.get("secret")
+        if not secret and account.get("store") != "file":
+            proc = _secret_tool("lookup", "service", SERVICE, "account", account["id"])
+            secret = proc.stdout.strip() if proc.returncode == 0 else ""
+        if secret:
+            vault["secrets"][account["id"]] = secret
+    vault_write(password, vault)
+    for account in data["accounts"]:
+        keyring_secret_del(account)
+        account["store"] = "vault"
+    save_index(data)
+    try:
+        LOCK.unlink()
+    except OSError:
+        pass
+    print("otp: secret gate upgraded to an encrypted vault", file=sys.stderr)
+
+
 def secret_del(account):
+    if VAULT.exists():
+        password = session_password()
+        if password:
+            vault = vault_read(password)
+            if vault["secrets"].pop(account["id"], None) is not None:
+                vault_write(password, vault)
+        account.pop("secret", None)
+        return
     if account.get("store") == "keyring":
         _secret_tool("clear", "service", SERVICE, "account", account["id"])
     account.pop("secret", None)
@@ -151,6 +211,108 @@ def secret_del(account):
 # gate stops someone at an unlocked desktop from reading codes over your
 # shoulder. Removing lock.json clears it (and that is the documented recovery),
 # so it is deliberately not sold as protection against a shell account.
+
+
+def _gpg(args, password, data_file=None):
+    """Run gpg symmetric, passphrase over stdin, payload via a file.
+
+    --no-symkey-cache keeps the agent from caching the passphrase, which would
+    otherwise let a later process decrypt without knowing it.
+    """
+    if not shutil.which("gpg"):
+        raise SystemExit("otp: gpg is not installed")
+    try:
+        return subprocess.run(
+            [
+                "gpg", "--batch", "--yes", "--quiet",
+                "--pinentry-mode", "loopback",
+                "--no-symkey-cache",
+                "--passphrase-fd", "0",
+                *args,
+            ],
+            input=(password + "\n").encode(),
+            capture_output=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise SystemExit(f"otp: gpg failed ({exc})")
+
+
+def session_password():
+    try:
+        return SESSION.read_text().rstrip("\n")
+    except OSError:
+        return None
+
+
+def set_session(password):
+    SESSION_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(SESSION_DIR, 0o700)
+    fd, tmp = tempfile.mkstemp(dir=str(SESSION_DIR), prefix=".session.")
+    with os.fdopen(fd, "w") as fh:
+        fh.write(password + "\n")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, SESSION)
+
+
+def clear_session():
+    try:
+        SESSION.unlink()
+    except OSError:
+        pass
+
+
+def vault_mode():
+    return VAULT.exists()
+
+
+def vault_read(password):
+    """Decrypt the vault. Raises SystemExit with a readable reason on failure."""
+    proc = _gpg(["--decrypt", "--output", "-", str(VAULT)], password)
+    if proc.returncode != 0:
+        raise SystemExit("otp: wrong password")
+    try:
+        data = json.loads(proc.stdout.decode() or "{}")
+    except ValueError:
+        raise SystemExit("otp: the vault is damaged")
+    data.setdefault("version", 1)
+    data.setdefault("secrets", {})
+    return data
+
+
+def vault_write(password, data):
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(DATA_DIR, 0o700)
+    fd, plain = tempfile.mkstemp(dir=str(DATA_DIR), prefix=".vault.", suffix=".json")
+    with os.fdopen(fd, "w") as fh:
+        json.dump(data, fh, indent=2, sort_keys=True)
+    encrypted = plain + ".gpg"
+    try:
+        proc = _gpg(
+            [
+                "--symmetric", "--cipher-algo", "AES256",
+                "--s2k-digest-algo", "SHA512", "--s2k-count", "65011712",
+                "--output", encrypted, plain,
+            ],
+            password,
+        )
+        if proc.returncode != 0:
+            raise SystemExit("otp: could not write the vault")
+        os.chmod(encrypted, 0o600)
+        os.replace(encrypted, VAULT)
+    finally:
+        for path in (plain, encrypted):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+
+def require_session():
+    password = session_password()
+    if not password:
+        raise SystemExit("otp: locked — unlock with the master password first")
+    return password
 
 
 def lock_state():
@@ -382,6 +544,11 @@ def read_stdin_or_env(env_key):
 
 def cmd_list(argv):
     as_json = "--json" in argv
+    if VAULT.exists() and not session_password():
+        if as_json:
+            print(json.dumps({"backend": "vault", "accounts": [], "now": int(time.time()), "locked": True}))
+            return 0
+        raise SystemExit("otp: locked — unlock with the master password first")
     data = load_index()
     rows = []
     for account in data["accounts"]:
@@ -566,65 +733,102 @@ def cmd_copy(argv):
 
 def cmd_lock(argv):
     action = (argv[0] if argv else "status").strip()
-    state = lock_state()
+    legacy = lock_state()
 
     if action == "status":
-        print(json.dumps({"configured": state is not None}))
+        print(
+            json.dumps(
+                {
+                    "configured": VAULT.exists() or legacy is not None,
+                    "vault": VAULT.exists(),
+                    "unlocked": session_password() is not None,
+                }
+            )
+        )
+        return 0
+
+    if action in ("unlock", "verify"):
+        if not VAULT.exists() and legacy is None:
+            return 0
+        password = read_password()
+        if VAULT.exists():
+            vault_read(password)  # wrong password exits here
+        else:
+            salt = base64.b64decode(legacy["salt"])
+            expected = base64.b64decode(legacy["hash"])
+            candidate = lock_derive(password, salt, legacy.get("iterations", LOCK_ITERATIONS))
+            if not hmac.compare_digest(candidate, expected):
+                print("otp: wrong password", file=sys.stderr)
+                return 1
+            migrate_to_vault(password)
+        if action == "unlock":
+            set_session(password)
+        return 0
+
+    if action == "now":
+        clear_session()
         return 0
 
     if action == "set":
         password = read_password()
         if len(password) < 6:
             raise SystemExit("otp: the master password needs at least 6 characters")
-        salt = os.urandom(16)
-        digest = lock_derive(password, salt, LOCK_ITERATIONS)
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        os.chmod(DATA_DIR, 0o700)
-        fd, tmp = tempfile.mkstemp(dir=str(DATA_DIR), prefix=".lock.", suffix=".json")
-        with os.fdopen(fd, "w") as fh:
-            json.dump(
-                {
-                    "version": 1,
-                    "algorithm": "pbkdf2-sha256",
-                    "iterations": LOCK_ITERATIONS,
-                    "salt": base64.b64encode(salt).decode(),
-                    "hash": base64.b64encode(digest).decode(),
-                },
-                fh,
-                indent=2,
-            )
-            fh.write("\n")
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, LOCK)
-        print("master password set")
-        return 0
-
-    if action == "verify":
-        if state is None:
-            return 0
-        password = read_password()
-        salt = base64.b64decode(state["salt"])
-        expected = base64.b64decode(state["hash"])
-        candidate = lock_derive(password, salt, state.get("iterations", LOCK_ITERATIONS))
-        if hmac.compare_digest(candidate, expected):
-            return 0
-        print("otp: wrong password", file=sys.stderr)
-        return 1
-
-    if action == "clear":
-        if state is not None:
-            password = read_password()
-            salt = base64.b64decode(state["salt"])
-            expected = base64.b64decode(state["hash"])
-            candidate = lock_derive(password, salt, state.get("iterations", LOCK_ITERATIONS))
-            if not hmac.compare_digest(candidate, expected):
-                print("otp: wrong password", file=sys.stderr)
-                return 1
+        # Re-wrapping an existing vault requires being unlocked by it first.
+        if VAULT.exists():
+            current = vault_read(require_session())
+        else:
+            current = {"version": 1, "secrets": {}}
+        data = load_index()
+        moved = 0
+        for account in data["accounts"]:
+            secret = current["secrets"].get(account["id"]) or secret_for(account)
+            if secret:
+                current["secrets"][account["id"]] = secret
+                moved += 1
+        vault_write(password, current)
+        for account in data["accounts"]:
+            secret_del(account)  # the vault is the only copy from here on
+            account["store"] = "vault"
+        save_index(data)
         try:
             LOCK.unlink()
-        except FileNotFoundError:
+        except OSError:
             pass
-        print("master password removed")
+        set_session(password)
+        print(f"master password set — {moved} secret(s) encrypted into the vault")
+        return 0
+
+    if action == "clear":
+        current = vault_read(require_session()) if VAULT.exists() else {"secrets": {}}
+        data = load_index()
+        try:
+            VAULT.unlink()
+        except OSError:
+            pass
+        for account in data["accounts"]:
+            secret = current["secrets"].get(account["id"])
+            account["store"] = ""
+            if secret:
+                secret_set(account, secret, data)
+        save_index(data)
+        clear_session()
+        print("master password removed — secrets are back in the login keyring")
+        return 0
+
+    if action == "reset":
+        if "--yes" not in argv:
+            raise SystemExit("otp: reset needs --yes — it destroys every account")
+        data = load_index()
+        if not VAULT.exists():
+            for account in data["accounts"]:
+                secret_del(account)
+        for path in (VAULT, INDEX, LOCK):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        clear_session()
+        print("authenticator reset — vault, accounts and session key are gone")
         return 0
 
     raise SystemExit(f"otp: unknown lock action {action!r}")

@@ -35,6 +35,7 @@ Panel {
   property string copiedId: ""
   property bool showAdd: false
   property bool showSecurity: false
+  property bool pendingReset: false
 
   readonly property bool locked: host ? host.needsUnlock === true : false
   readonly property bool lockConfigured: host ? host.lockConfigured === true : false
@@ -131,6 +132,18 @@ Panel {
     showSecurity = false
   }
 
+  // Two-step, because there is deliberately no recovery path: the vault cannot
+  // be opened without the password, so reset is the only way forward and it
+  // takes every account with it.
+  function askReset() {
+    if (!pendingReset) {
+      pendingReset = true
+      return
+    }
+    pendingReset = false
+    if (host && host.resetAuthenticator) host.resetAuthenticator()
+  }
+
   function toggleMask() {
     if (host && host.setMaskCodes) host.setMaskCodes(!masked)
   }
@@ -200,6 +213,7 @@ Panel {
     if (!opened) {
       pendingRemoveId = ""
       copiedId = ""
+      pendingReset = false
       return
     }
     cursorIndex = 0
@@ -363,13 +377,30 @@ Panel {
               font.pixelSize: Style.font.caption
             }
 
-            Text {
+            Row {
               width: parent.width
-              wrapMode: Text.WordWrap
-              text: "Forgotten it? Delete ~/.local/share/psamoluk.totp/lock.json — the secrets live in your keyring, not behind this password."
-              color: Util.alpha(root.barForeground, 0.34)
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
+              spacing: Style.space(8)
+
+              Text {
+                width: parent.width - resetButton.width - parent.spacing
+                wrapMode: Text.WordWrap
+                text: root.pendingReset
+                  ? "This deletes the encrypted vault and every account in it. Nothing can bring them back."
+                  : "No recovery: the secrets are encrypted with this password. Forgetting it means resetting the authenticator."
+                color: root.pendingReset ? Color.urgent : Util.alpha(root.barForeground, 0.34)
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+
+              Button {
+                id: resetButton
+                text: root.pendingReset ? "Reset everything" : "Reset…"
+                fontFamily: root.fontFamily
+                fontSize: Style.font.caption
+                foreground: root.pendingReset ? Color.urgent : root.barForeground
+                bordered: true
+                onClicked: root.askReset()
+              }
             }
           }
         }
@@ -465,8 +496,8 @@ Panel {
               width: parent.width
               wrapMode: Text.WordWrap
               text: root.lockConfigured
-                ? "Master password is set: asked once per session, re-locked after " + host.lockMinutes + " minutes idle."
-                : "Set a master password to gate the codes behind one entry per session."
+                ? "Secrets are encrypted under your master password. It is asked once per login, re-locked after " + host.lockMinutes + " minutes idle."
+                : "Set a master password to encrypt the secrets. It is asked once per login."
               color: Util.alpha(root.barForeground, 0.62)
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
@@ -483,7 +514,7 @@ Panel {
                 foreground: root.barForeground
                 password: true
                 selectByMouse: true
-                placeholderText: root.lockConfigured ? "current or new password" : "new password (6+ characters)"
+                placeholderText: root.lockConfigured ? "new password" : "master password (6+ characters)"
                 onAccepted: root.submitSetPassword()
                 Keys.onEscapePressed: keyCatcher.forceActiveFocus()
               }
