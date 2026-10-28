@@ -89,7 +89,7 @@ Panel {
       notice = "Paste an otpauth:// URI, or the secret and a name."
       return
     }
-    notice = ""
+    notice = "Adding…"
     if (looksLikeUri(text)) {
       if (host && host.addUri) host.addUri(text)
       uriField.text = ""
@@ -105,6 +105,7 @@ Panel {
       Qt.callLater(function() { labelField.forceActiveFocus() })
       return
     }
+    notice = "Adding…"
     if (host && host.addSecret) host.addSecret(name, text)
     uriField.text = ""
     labelField.text = ""
