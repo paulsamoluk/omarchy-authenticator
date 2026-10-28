@@ -68,11 +68,12 @@ Optionally put the helper on `PATH`:
 
 ## What it looks like
 
-The bar shows a key with a two-pixel **fuse** under it — the soonest code's
-remaining life, burning down. The panel opens on a ring around the key that
-carries the same countdown, then one card per account: label and issuer on the
+The bar shows a key, the same size and weight as its neighbours — no countdown
+in the bar, nothing to misread at a glance. The panel drops out of the bar
+**directly under that icon** and opens on a ring around the key carrying the
+soonest code's countdown, then one card per account: label and issuer on the
 left, the code in large type on the right, and a fuse along each card's bottom
-edge.
+edge that burns down as the code expires.
 
 Colour is used for exactly two states, so a glance is enough:
 
@@ -85,6 +86,26 @@ Hovering a card lifts it and reveals its remove button; the selected card (the
 one `↑`/`↓` and `Enter` act on) gets a wash from its accent edge. Codes fade in
 as they roll, and the whole countdown moves five times a second instead of
 stepping once per second.
+
+## Master password
+
+Optional, off by default. Set it in the panel — the padlock button in the
+toolbar — and the codes stay hidden behind one password entry per session:
+
+- The prompt appears the **first time you open the panel in a shell session**;
+  unlocking holds for the rest of that session.
+- It **re-locks after 15 minutes without use** (`lockMinutes` on the widget's
+  `shell.json` entry changes that), and "Lock now" in the same card locks it
+  immediately.
+- While locked the widget generates no codes at all — the helper is not asked
+  for them.
+- Forgotten it? `rm ~/.local/share/psamoluk.totp/lock.json` clears the gate.
+  That is also why this is a **screen lock, not encryption**: the secrets stay
+  in your login keyring, and anything that can read the keyring (your shell,
+  `bin/otp list`) can still read them. What it stops is someone walking up to
+  your unlocked desktop and reading codes off the panel.
+- The password is stored as PBKDF2-SHA256 (300k iterations, random salt) in
+  `~/.local/share/psamoluk.totp/lock.json`, mode 0600, never in argv.
 
 ## Where the secrets live
 

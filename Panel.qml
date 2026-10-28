@@ -34,6 +34,11 @@ Panel {
   property string pendingRemoveId: ""
   property string copiedId: ""
   property bool showAdd: false
+  property bool showSecurity: false
+
+  readonly property bool locked: host ? host.needsUnlock === true : false
+  readonly property bool lockConfigured: host ? host.lockConfigured === true : false
+  readonly property string lockError: host ? (host.lockError || "") : ""
 
   // Seconds until the soonest code rolls, for the hero ring and its meta line.
   readonly property int soonestLeft: {
@@ -97,6 +102,26 @@ Panel {
     notice = "Copied " + account.label + " — clipboard clears in 60 s"
   }
 
+  function submitUnlock() {
+    if (!host || !host.unlock) return
+    host.unlock(unlockField.text)
+  }
+
+  function submitSetPassword() {
+    if (!host || !host.setPassword) return
+    host.setPassword(setField.text)
+  }
+
+  function submitClearPassword() {
+    if (!host || !host.clearPassword) return
+    host.clearPassword(setField.text)
+  }
+
+  function lockNow() {
+    if (host && host.relock) host.relock()
+    showSecurity = false
+  }
+
   function toggleMask() {
     if (host && host.setMaskCodes) host.setMaskCodes(!masked)
   }
@@ -158,7 +183,12 @@ Panel {
     }
     cursorIndex = 0
     notice = ""
-    if (host && host.refresh) host.refresh()
+    if (locked) {
+      Qt.callLater(function() { unlockField.forceActiveFocus() })
+    } else {
+      if (host && host.touch) host.touch()
+      if (host && host.refresh) host.refresh()
+    }
     reveal.restart()
   }
 
@@ -172,6 +202,12 @@ Panel {
   Connections {
     target: root.host
     ignoreUnknownSignals: true
+    function onNeedsUnlockChanged() {
+      if (!root.locked && unlockField) unlockField.text = ""
+    }
+    function onLockConfiguredChanged() {
+      if (setField) setField.text = ""
+    }
     function onAddErrorChanged() {
       if (!root.host) return
       if (root.host.addError && root.host.addError !== "") {
@@ -190,7 +226,9 @@ Panel {
     owner: root.barIdentity
     bar: root.bar
     open: root.opened
-    centerOnBar: true
+    // Anchor under the bar icon rather than mid-screen: the widget sits in the
+    // right section, so a centred card reads as belonging to nothing.
+    centerOnBar: false
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(520))
     contentHeight: panel.fittedContentHeight(content.implicitHeight)
@@ -204,6 +242,7 @@ Panel {
       onActivateRequested: root.activateCursor()
       onReturnRequested: root.activateCursor()
       onTextKey: function(text) {
+        if (root.locked) return
         if (text === "a" || text === "A" || text === "/") {
           root.showAdd = true
           Qt.callLater(function() { uriField.forceActiveFocus() })
@@ -232,17 +271,92 @@ Panel {
 
         PanelHero {
           width: parent.width
-          iconComponent: heroRing
-          title: "Authenticator"
-          meta: root.addLabel()
+          iconComponent: root.locked ? lockGlyph : heroRing
+          title: root.locked ? "Locked" : "Authenticator"
+          meta: root.locked ? "master password required" : root.addLabel()
           detail: ""
           foreground: root.barForeground
           fontFamily: root.fontFamily
         }
 
+        // ------------------------------- lock --------------------------------
+        Rectangle {
+          id: lockCard
+          width: parent.width
+          visible: root.locked
+          height: lockColumn.implicitHeight + Style.space(18)
+          radius: Style.cornerRadius
+          color: Util.alpha(root.barForeground, 0.04)
+          border.width: 1
+          border.color: Util.alpha(Color.accent, 0.30)
+
+          Column {
+            id: lockColumn
+            anchors.fill: parent
+            anchors.margins: Style.space(9)
+            spacing: Style.space(7)
+
+            Text {
+              width: parent.width
+              wrapMode: Text.WordWrap
+              text: "Enter your master password to show codes for this session."
+              color: Util.alpha(root.barForeground, 0.62)
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+
+            Row {
+              width: parent.width
+              spacing: Style.space(8)
+
+              TextField {
+                id: unlockField
+                width: parent.width - unlockButton.width - parent.spacing
+                height: Style.space(30)
+                foreground: root.barForeground
+                password: true
+                selectByMouse: true
+                placeholderText: "master password"
+                onAccepted: root.submitUnlock()
+                Keys.onEscapePressed: keyCatcher.forceActiveFocus()
+              }
+
+              Button {
+                id: unlockButton
+                text: "Unlock"
+                fontFamily: root.fontFamily
+                fontSize: Style.font.body
+                foreground: root.barForeground
+                bordered: true
+                onClicked: root.submitUnlock()
+              }
+            }
+
+            Text {
+              width: parent.width
+              visible: root.lockError !== ""
+              wrapMode: Text.WordWrap
+              text: root.lockError
+              color: Color.urgent
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+
+            Text {
+              width: parent.width
+              wrapMode: Text.WordWrap
+              text: "Forgotten it? Delete ~/.local/share/psamoluk.totp/lock.json — the secrets live in your keyring, not behind this password."
+              color: Util.alpha(root.barForeground, 0.34)
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+          }
+        }
+
         // ------------------------------ toolbar ------------------------------
         Item {
           width: parent.width
+          visible: !root.locked
           implicitHeight: Math.max(codesHeader.implicitHeight, tools.implicitHeight)
 
           PanelSectionHeader {
@@ -280,6 +394,14 @@ Panel {
             }
 
             PanelActionButton {
+              iconText: root.lockConfigured ? "\uF023" : "\uF09C"
+              foreground: root.showSecurity ? Color.accent : root.barForeground
+              fontSize: Style.font.caption
+              tooltipText: root.lockConfigured ? "Master password" : "Set a master password"
+              onClicked: root.showSecurity = !root.showSecurity
+            }
+
+            PanelActionButton {
               iconText: root.masked ? "\uF06E" : "\uF070"
               foreground: root.barForeground
               fontSize: Style.font.caption
@@ -301,11 +423,102 @@ Panel {
           }
         }
 
+        // ------------------------------ security -----------------------------
+        Rectangle {
+          id: securityCard
+          width: parent.width
+          visible: !root.locked && root.showSecurity
+          height: securityColumn.implicitHeight + Style.space(18)
+          radius: Style.cornerRadius
+          color: Util.alpha(root.barForeground, 0.04)
+          border.width: 1
+          border.color: Util.alpha(root.barForeground, 0.12)
+
+          Column {
+            id: securityColumn
+            anchors.fill: parent
+            anchors.margins: Style.space(9)
+            spacing: Style.space(7)
+
+            Text {
+              width: parent.width
+              wrapMode: Text.WordWrap
+              text: root.lockConfigured
+                ? "Master password is set: asked once per session, re-locked after " + host.lockMinutes + " minutes idle."
+                : "Set a master password to gate the codes behind one entry per session."
+              color: Util.alpha(root.barForeground, 0.62)
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+
+            Row {
+              width: parent.width
+              spacing: Style.space(8)
+
+              TextField {
+                id: setField
+                width: parent.width - securityButtons.width - parent.spacing
+                height: Style.space(30)
+                foreground: root.barForeground
+                password: true
+                selectByMouse: true
+                placeholderText: root.lockConfigured ? "current or new password" : "new password (6+ characters)"
+                onAccepted: root.submitSetPassword()
+                Keys.onEscapePressed: keyCatcher.forceActiveFocus()
+              }
+
+              Row {
+                id: securityButtons
+                spacing: Style.space(6)
+
+                Button {
+                  text: root.lockConfigured ? "Change" : "Set"
+                  fontFamily: root.fontFamily
+                  fontSize: Style.font.body
+                  foreground: root.barForeground
+                  bordered: true
+                  onClicked: root.submitSetPassword()
+                }
+
+                Button {
+                  text: "Lock now"
+                  visible: root.lockConfigured
+                  fontFamily: root.fontFamily
+                  fontSize: Style.font.body
+                  foreground: root.barForeground
+                  bordered: true
+                  onClicked: root.lockNow()
+                }
+
+                Button {
+                  text: "Remove"
+                  visible: root.lockConfigured
+                  fontFamily: root.fontFamily
+                  fontSize: Style.font.body
+                  foreground: root.barForeground
+                  bordered: true
+                  onClicked: root.submitClearPassword()
+                }
+              }
+            }
+
+            Text {
+              width: parent.width
+              visible: root.lockError !== ""
+              wrapMode: Text.WordWrap
+              text: root.lockError
+              color: Color.urgent
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+          }
+        }
+
         // ------------------------------- add card ----------------------------
         Rectangle {
           id: addCard
           width: parent.width
-          visible: root.showAdd || root.count === 0
+          visible: !root.locked && (root.showAdd || root.count === 0)
           height: addColumn.implicitHeight + Style.space(18)
           radius: Style.cornerRadius
           color: Util.alpha(root.barForeground, 0.04)
@@ -389,7 +602,7 @@ Panel {
           clip: true
           boundsBehavior: Flickable.StopAtBounds
           flickableDirection: Flickable.VerticalFlick
-          visible: root.count > 0
+          visible: root.count > 0 && !root.locked
 
           Column {
           id: codesColumn
@@ -622,12 +835,32 @@ Panel {
         Text {
           width: parent.width
           horizontalAlignment: Text.AlignHCenter
-          text: "Click to copy  ·  ↑↓ move  ·  M hides  ·  Esc closes"
+          text: root.locked
+            ? "Enter your master password  ·  Esc closes"
+            : "Click to copy  ·  ↑↓ move  ·  M hides  ·  Esc closes"
           color: Util.alpha(root.barForeground, 0.35)
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
           wrapMode: Text.WordWrap
         }
+      }
+    }
+  }
+
+  // Locked state: a plain lock, no countdown to show.
+  Component {
+    id: lockGlyph
+
+    Item {
+      implicitWidth: Style.space(42)
+      implicitHeight: Style.space(42)
+
+      OpticalGlyph {
+        anchors.centerIn: parent
+        text: "\uF023"
+        fontFamily: root.fontFamily
+        fontSize: Math.round(Style.font.display * 0.9)
+        color: Util.alpha(root.barForeground, 0.9)
       }
     }
   }

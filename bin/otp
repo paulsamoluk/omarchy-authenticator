@@ -14,7 +14,8 @@ Commands
                                 secret from --secret / OTP_SECRET / stdin ("-")
   add-uri [otpauth://URI]       URI from OTP_URI env, argv, or stdin
   remove NAME|--id ID
-  copy NAME|--id ID             copy the current code (paste-once)
+  copy NAME|--id ID             copy the current code (60 s auto-clear)
+  lock status|set|verify|clear  master password gate (password on stdin)
   check                         backend + account count
 """
 
@@ -34,6 +35,8 @@ from pathlib import Path
 
 DATA_DIR = Path(os.environ.get("TOTP_DATA_DIR") or (Path.home() / ".local/share/psamoluk.totp"))
 INDEX = DATA_DIR / "accounts.json"
+LOCK = DATA_DIR / "lock.json"
+LOCK_ITERATIONS = 300_000
 SERVICE = "psamoluk.totp"
 KEYRING_LABEL = "omarchy-totp"
 
@@ -139,6 +142,40 @@ def secret_del(account):
     if account.get("store") == "keyring":
         _secret_tool("clear", "service", SERVICE, "account", account["id"])
     account.pop("secret", None)
+
+
+# ------------------------------------------------------------------- lock ----
+#
+# A screen lock, not encryption: the secrets stay in the login keyring, this
+# gate stops someone at an unlocked desktop from reading codes over your
+# shoulder. Removing lock.json clears it (and that is the documented recovery),
+# so it is deliberately not sold as protection against a shell account.
+
+
+def lock_state():
+    try:
+        with LOCK.open() as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or "salt" not in data or "hash" not in data:
+        return None
+    return data
+
+
+def lock_derive(password, salt, iterations):
+    return hashlib.pbkdf2_hmac("sha256", password.encode(), salt, int(iterations))
+
+
+def read_password(env_key="OTP_PASSWORD"):
+    value = os.environ.get(env_key, "")
+    if value:
+        return value
+    if not sys.stdin.isatty():
+        return sys.stdin.readline().rstrip("\r\n")
+    return ""
 
 
 # ------------------------------------------------------------------- totp ----
@@ -435,10 +472,77 @@ def cmd_copy(argv):
     return 0
 
 
+def cmd_lock(argv):
+    action = (argv[0] if argv else "status").strip()
+    state = lock_state()
+
+    if action == "status":
+        print(json.dumps({"configured": state is not None}))
+        return 0
+
+    if action == "set":
+        password = read_password()
+        if len(password) < 6:
+            raise SystemExit("otp: the master password needs at least 6 characters")
+        salt = os.urandom(16)
+        digest = lock_derive(password, salt, LOCK_ITERATIONS)
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        os.chmod(DATA_DIR, 0o700)
+        fd, tmp = tempfile.mkstemp(dir=str(DATA_DIR), prefix=".lock.", suffix=".json")
+        with os.fdopen(fd, "w") as fh:
+            json.dump(
+                {
+                    "version": 1,
+                    "algorithm": "pbkdf2-sha256",
+                    "iterations": LOCK_ITERATIONS,
+                    "salt": base64.b64encode(salt).decode(),
+                    "hash": base64.b64encode(digest).decode(),
+                },
+                fh,
+                indent=2,
+            )
+            fh.write("\n")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, LOCK)
+        print("master password set")
+        return 0
+
+    if action == "verify":
+        if state is None:
+            return 0
+        password = read_password()
+        salt = base64.b64decode(state["salt"])
+        expected = base64.b64decode(state["hash"])
+        candidate = lock_derive(password, salt, state.get("iterations", LOCK_ITERATIONS))
+        if hmac.compare_digest(candidate, expected):
+            return 0
+        print("otp: wrong password", file=sys.stderr)
+        return 1
+
+    if action == "clear":
+        if state is not None:
+            password = read_password()
+            salt = base64.b64decode(state["salt"])
+            expected = base64.b64decode(state["hash"])
+            candidate = lock_derive(password, salt, state.get("iterations", LOCK_ITERATIONS))
+            if not hmac.compare_digest(candidate, expected):
+                print("otp: wrong password", file=sys.stderr)
+                return 1
+        try:
+            LOCK.unlink()
+        except FileNotFoundError:
+            pass
+        print("master password removed")
+        return 0
+
+    raise SystemExit(f"otp: unknown lock action {action!r}")
+
+
 def cmd_check(argv):
     data = load_index()
     backend = data.get("backend") or ("keyring" if keyring_available() else "file")
-    print(f"backend={backend} accounts={len(data['accounts'])} index={INDEX}")
+    locked = "locked" if lock_state() is not None else "unlocked"
+    print(f"backend={backend} accounts={len(data['accounts'])} lock={locked} index={INDEX}")
     return 0
 
 
@@ -454,6 +558,7 @@ def main(argv):
         "remove": cmd_remove,
         "copy": cmd_copy,
         "check": cmd_check,
+        "lock": cmd_lock,
     }
     if command in ("-h", "--help", "help"):
         print(__doc__)

@@ -29,16 +29,19 @@ BarWidget {
   property string error: ""
   property bool busy: false
   property bool pendingRefresh: false
+  // Session lock. Held for the lifetime of the shell process: a fresh session
+  // (or a shell restart) asks again.
+  property bool lockKnown: false
+  property bool lockConfigured: false
+  property bool unlocked: false
+  property string lockError: ""
+  readonly property int lockMinutes: (settings && Number(settings.lockMinutes) > 0) ? Number(settings.lockMinutes) : 15
+  readonly property bool needsUnlock: lockConfigured && !unlocked
   property double nowMs: Date.now()
   readonly property double nowSec: nowMs / 1000
 
   readonly property int count: accounts.length
   readonly property int secondsLeft: Model.secondsLeft(soonest(), nowSec)
-  readonly property real soonestFraction: {
-    var pick = soonest()
-    return pick ? Model.progressFraction(pick, nowSec) : 0
-  }
-  readonly property bool urgent: count > 0 && secondsLeft <= 5
   readonly property bool showCountdown: settings && settings.showCountdown === true
   readonly property bool maskCodes: settings && settings.maskCodes === true
 
@@ -74,6 +77,11 @@ BarWidget {
   // Data
   // ---------------------------------------------------------------------------
   function refresh() {
+    if (!lockKnown) return
+    if (needsUnlock) {
+      accounts = []
+      return
+    }
     if (busy) {
       pendingRefresh = true
       return
@@ -122,6 +130,130 @@ BarWidget {
     addProc.inputText = key
     addProc.running = true
     return true
+  }
+
+  function touch() {
+    if (unlocked) idleLock.restart()
+  }
+
+  function relock() {
+    unlocked = false
+    accounts = []
+    lockError = ""
+  }
+
+  function refreshLockState() {
+    lockStatusProc.running = true
+  }
+
+  function unlock(password) {
+    var pw = String(password || "")
+    if (pw === "") {
+      lockError = "Enter the master password"
+      return
+    }
+    lockError = ""
+    verifyProc.inputText = pw
+    verifyProc.running = true
+  }
+
+  function setPassword(password) {
+    var pw = String(password || "")
+    if (pw.length < 6) {
+      lockError = "Use at least 6 characters"
+      return
+    }
+    lockError = ""
+    setLockProc.inputText = pw
+    setLockProc.running = true
+  }
+
+  function clearPassword(password) {
+    clearLockProc.inputText = String(password || "")
+    clearLockProc.running = true
+  }
+
+  Process {
+    id: lockStatusProc
+    command: [helperPath, "lock", "status"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          root.lockConfigured = JSON.parse(String(text || "{}")).configured === true
+        } catch (e) {
+          root.lockConfigured = false
+        }
+        if (!root.lockConfigured) root.unlocked = true
+        root.lockKnown = true
+        root.refresh()
+      }
+    }
+  }
+
+  Process {
+    id: verifyProc
+    command: [helperPath, "lock", "verify"]
+    property string inputText: ""
+    stdinEnabled: true
+    stderr: StdioCollector { waitForEnd: true }
+    onStarted: { write(inputText + "\n"); inputText = "" }
+    onExited: {
+      if (exitCode === 0) {
+        root.unlocked = true
+        root.lockError = ""
+        root.touch()
+        root.refresh()
+      } else {
+        root.lockError = "Wrong password"
+      }
+    }
+  }
+
+  Process {
+    id: setLockProc
+    command: [helperPath, "lock", "set"]
+    property string inputText: ""
+    stdinEnabled: true
+    stderr: StdioCollector { waitForEnd: true }
+    onStarted: { write(inputText + "\n"); inputText = "" }
+    onExited: {
+      if (exitCode === 0) {
+        root.lockConfigured = true
+        root.unlocked = true
+        root.lockError = ""
+        root.touch()
+      } else {
+        root.lockError = "Could not set the password"
+      }
+    }
+  }
+
+  Process {
+    id: clearLockProc
+    command: [helperPath, "lock", "clear"]
+    property string inputText: ""
+    stdinEnabled: true
+    stderr: StdioCollector { waitForEnd: true }
+    onStarted: { write(inputText + "\n"); inputText = "" }
+    onExited: {
+      if (exitCode === 0) {
+        root.lockConfigured = false
+        root.unlocked = true
+        root.lockError = ""
+      } else {
+        root.lockError = "Wrong password"
+      }
+    }
+  }
+
+  // Idle re-lock: closing the panel keeps the session unlocked, but walking
+  // away from an unlocked desktop for lockMinutes does not.
+  Timer {
+    id: idleLock
+    interval: root.lockMinutes * 60 * 1000
+    repeat: false
+    onTriggered: root.relock()
   }
 
   Process {
@@ -195,8 +327,16 @@ BarWidget {
     onTriggered: root.refresh()
   }
 
-  Component.onCompleted: refresh()
-  onSettingsChanged: injectPanel()
+  Component.onCompleted: {
+    refreshLockState()
+    refresh()
+  }
+
+  onSettingsChanged: {
+    injectPanel()
+    touch()
+    idleLock.interval = lockMinutes * 60 * 1000
+  }
 
   // ---------------------------------------------------------------------------
   // Panel wiring
@@ -252,9 +392,8 @@ BarWidget {
     BarIconButton {
       id: button
       bar: root.bar
-      iconComponent: barRing
+      text: root.icon
       slotSize: Style.bar.statusSlot
-      opticalSize: Style.bar.statusSlot
       tooltipText: {
         if (root.error !== "") return "Authenticator — " + root.error
         if (root.count === 0) return "Authenticator — no accounts yet"
@@ -271,48 +410,6 @@ BarWidget {
       opacity: root.secondsLeft <= 5 ? 1.0 : 0.6
       font.family: Style.font.family
       font.pixelSize: Style.font.caption
-    }
-  }
-
-  // The bar keeps the key glyph and hangs a two-pixel "fuse" under it: the
-  // soonest code's remaining time, burning down. A ring at 16 px got swallowed
-  // by the glyph, and the fuse stays legible beside the other bar items.
-  Component {
-    id: barRing
-
-    Item {
-      implicitWidth: Style.bar.statusSlot
-      implicitHeight: Style.bar.statusSlot
-
-      readonly property color ink: root.bar ? root.bar.barForeground : Color.foreground
-
-      OpticalGlyph {
-        anchors.centerIn: parent
-        anchors.verticalCenterOffset: -Math.round(Style.space(1))
-        text: root.icon
-        fontFamily: Style.font.family
-        fontSize: Style.font.iconLarge
-        color: parent.ink
-      }
-
-      Rectangle {
-        anchors.horizontalCenter: parent.horizontalCenter
-        anchors.bottom: parent.bottom
-        anchors.bottomMargin: Math.round(Style.space(1))
-        width: Math.round(parent.width * 0.58)
-        height: 2
-        radius: 1
-        color: Util.alpha(parent.ink, 0.18)
-
-        Rectangle {
-          width: parent.width * root.soonestFraction
-          height: parent.height
-          radius: parent.radius
-          color: root.urgent ? Color.accent : Util.alpha(parent.parent.ink, 0.85)
-          Behavior on width { NumberAnimation { duration: 200; easing.type: Easing.Linear } }
-          Behavior on color { ColorAnimation { duration: 200 } }
-        }
-      }
     }
   }
 }
