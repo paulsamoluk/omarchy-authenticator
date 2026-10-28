@@ -29,10 +29,16 @@ BarWidget {
   property string error: ""
   property bool busy: false
   property bool pendingRefresh: false
-  property double nowSec: Date.now() / 1000
+  property double nowMs: Date.now()
+  readonly property double nowSec: nowMs / 1000
 
   readonly property int count: accounts.length
   readonly property int secondsLeft: Model.secondsLeft(soonest(), nowSec)
+  readonly property real soonestFraction: {
+    var pick = soonest()
+    return pick ? Model.progressFraction(pick, nowSec) : 0
+  }
+  readonly property bool urgent: count > 0 && secondsLeft <= 5
   readonly property bool showCountdown: settings && settings.showCountdown === true
   readonly property bool maskCodes: settings && settings.maskCodes === true
 
@@ -82,7 +88,7 @@ BarWidget {
     accounts = parsed.accounts
     backend = parsed.backend
     error = parsed.ok ? "" : parsed.error
-    nowSec = Date.now() / 1000
+    nowMs = Date.now()
   }
 
   function copyCode(account) {
@@ -168,15 +174,16 @@ BarWidget {
   property string addError: ""
   property bool addSucceeded: false
 
-  // One tick per second is arithmetic only; the process runs when a code rolls.
+  // Five ticks a second is arithmetic only (the ring reads the clock); the
+  // helper itself runs once per code period, when a countdown hits zero.
   Timer {
-    interval: 1000
+    interval: 200
     repeat: true
-    running: true
+    running: root.count > 0
     triggeredOnStart: true
     onTriggered: {
-      root.nowSec = Date.now() / 1000
-      if (root.count > 0 && root.secondsLeft <= 0) root.refresh()
+      root.nowMs = Date.now()
+      if (root.secondsLeft <= 0) root.refresh()
     }
   }
 
@@ -245,8 +252,9 @@ BarWidget {
     BarIconButton {
       id: button
       bar: root.bar
-      text: root.icon
+      iconComponent: barRing
       slotSize: Style.bar.statusSlot
+      opticalSize: Style.bar.statusSlot
       tooltipText: {
         if (root.error !== "") return "Authenticator — " + root.error
         if (root.count === 0) return "Authenticator — no accounts yet"
@@ -263,6 +271,48 @@ BarWidget {
       opacity: root.secondsLeft <= 5 ? 1.0 : 0.6
       font.family: Style.font.family
       font.pixelSize: Style.font.caption
+    }
+  }
+
+  // The bar keeps the key glyph and hangs a two-pixel "fuse" under it: the
+  // soonest code's remaining time, burning down. A ring at 16 px got swallowed
+  // by the glyph, and the fuse stays legible beside the other bar items.
+  Component {
+    id: barRing
+
+    Item {
+      implicitWidth: Style.bar.statusSlot
+      implicitHeight: Style.bar.statusSlot
+
+      readonly property color ink: root.bar ? root.bar.barForeground : Color.foreground
+
+      OpticalGlyph {
+        anchors.centerIn: parent
+        anchors.verticalCenterOffset: -Math.round(Style.space(1))
+        text: root.icon
+        fontFamily: Style.font.family
+        fontSize: Style.font.iconLarge
+        color: parent.ink
+      }
+
+      Rectangle {
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: Math.round(Style.space(1))
+        width: Math.round(parent.width * 0.58)
+        height: 2
+        radius: 1
+        color: Util.alpha(parent.ink, 0.18)
+
+        Rectangle {
+          width: parent.width * root.soonestFraction
+          height: parent.height
+          radius: parent.radius
+          color: root.urgent ? Color.accent : Util.alpha(parent.parent.ink, 0.85)
+          Behavior on width { NumberAnimation { duration: 200; easing.type: Easing.Linear } }
+          Behavior on color { ColorAnimation { duration: 200 } }
+        }
+      }
     }
   }
 }

@@ -66,6 +66,26 @@ appears in a process argument list.
 Optionally put the helper on `PATH`:
 `ln -s ~/.config/omarchy/plugins/psamoluk.totp/bin/otp ~/.local/bin/otp`
 
+## What it looks like
+
+The bar shows a key with a two-pixel **fuse** under it — the soonest code's
+remaining life, burning down. The panel opens on a ring around the key that
+carries the same countdown, then one card per account: label and issuer on the
+left, the code in large type on the right, and a fuse along each card's bottom
+edge.
+
+Colour is used for exactly two states, so a glance is enough:
+
+- **accent** — this code changes in five seconds or less (ring, fuse and the
+  seconds count turn accent), or you just copied it (card outline, check glyph,
+  code tint for ~1.4 s).
+- everything else stays in the theme's foreground at varying opacity.
+
+Hovering a card lifts it and reveals its remove button; the selected card (the
+one `↑`/`↓` and `Enter` act on) gets a wash from its accent edge. Codes fade in
+as they roll, and the whole countdown moves five times a second instead of
+stepping once per second.
+
 ## Where the secrets live
 
 - **Login keyring by default** (`secret-tool`, service `psamoluk.totp`, one item
