@@ -224,7 +224,7 @@ def _gpg(args, password, data_file=None):
     try:
         return subprocess.run(
             [
-                "gpg", "--batch", "--yes", "--quiet",
+                "gpg", "--batch", "--yes", "--quiet", "--no-options",
                 "--pinentry-mode", "loopback",
                 "--no-symkey-cache",
                 "--passphrase-fd", "0",
@@ -479,6 +479,11 @@ def qr_payload(path):
     if not shutil.which("zbarimg"):
         raise SystemExit("otp: zbarimg is not installed (pacman -S zbar)")
     try:
+        if os.path.getsize(path) > 20 * 1024 * 1024:
+            raise SystemExit("otp: that image is too large to be a QR screenshot")
+    except OSError:
+        raise SystemExit("otp: could not read the image")
+    try:
         proc = subprocess.run(
             ["zbarimg", "--quiet", "--raw", path],
             capture_output=True,
@@ -595,8 +600,10 @@ def cmd_add(argv):
             label = rest.pop(0)
         elif flag in ("--issuer", "-i") and rest:
             opts["issuer"] = rest.pop(0)
-        elif flag in ("--secret", "-s") and rest:
-            secret = rest.pop(0)
+        elif flag in ("--secret", "-s"):
+            # Refused on purpose: an argv secret is visible in `ps` for as long
+            # as the process lives. Send it on stdin instead.
+            raise SystemExit("otp: put the secret on stdin, not in an argument")
         elif flag == "--digits" and rest:
             opts["digits"] = rest.pop(0)
         elif flag == "--period" and rest:

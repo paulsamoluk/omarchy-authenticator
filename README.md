@@ -1,5 +1,7 @@
 # Authenticator — TOTP codes in the Omarchy bar
 
+![Authenticator panel](preview.png)
+
 A bar widget that generates your two-factor codes locally (RFC 6238 TOTP) and
 puts them one click from the bar: click the key, read the code, click it to copy.
 No phone, no cloud, no network.
@@ -72,12 +74,20 @@ otp add-qr --clipboard                 # whatever image is on the clipboard
 **From the shell**, same thing:
 
 ```bash
-~/.config/omarchy/plugins/psamoluk.totp/bin/otp add-uri 'otpauth://totp/...'
-~/.config/omarchy/plugins/psamoluk.totp/bin/otp add --label GitHub --issuer GitHub --secret JBSWY3DPEHPK3PXP
-~/.config/omarchy/plugins/psamoluk.totp/bin/otp list
-~/.config/omarchy/plugins/psamoluk.totp/bin/otp copy GitHub      # copies the current code
-~/.config/omarchy/plugins/psamoluk.totp/bin/otp remove GitHub
+OTP=~/.config/omarchy/plugins/psamoluk.totp/bin/otp
+
+$OTP add-qr ~/Pictures/screenshot.png            # decode a QR screenshot
+printf 'otpauth://totp/...' | $OTP add-uri        # URI on stdin
+printf 'JBSWY3DPEHPK3PXP\n' | $OTP add --label GitHub --issuer GitHub   # bare secret
+$OTP list
+$OTP copy GitHub                                  # copies the current code
+$OTP remove GitHub
 ```
+
+Secrets and master passwords are only ever read from **stdin**: `--secret` is
+refused outright, because an argument is visible in `ps` for the life of the
+process. Passing a URI as an argument to `add-uri` still works for convenience,
+with that caveat.
 
 `--digits`, `--period` and `--algorithm` (SHA1/SHA256/SHA512) are accepted on
 `add`, and are read from the URI when using `add-uri`.
@@ -174,6 +184,38 @@ Stored inline on the widget's `shell.json` entry:
   go to the `0600` file; without `wl-copy` the helper prints the code instead of
   copying it; without `zbar` the QR button explains what to install.
 - No services, no sudo, no network, no build step.
+
+## Security
+
+Read this before trusting it with your second factor.
+
+**Privilege boundary:** no sudo, no root, no system services, no network
+requests, no post-install hooks, no background daemon. The plugin is QML loaded
+inside the running `omarchy-shell`, plus one Python 3 (stdlib) helper that runs
+only when the widget or the panel calls it.
+
+**What it writes:** `~/.local/share/psamoluk.totp/` (dir 0700) holding
+`accounts.json` (labels and TOTP parameters, 0600) and `vault.gpg` (secrets,
+AES-256, 0600); the session key in `$XDG_RUNTIME_DIR/psamoluk.totp/session`
+(0700 dir, 0600, tmpfs, removed on lock and at logout); login-keyring items when
+no master password is set; and the clipboard, when you click a code. It never
+writes to your Omarchy configuration.
+
+**Secret handling:** every secret and password reaches the helper on stdin —
+`--secret` is rejected, codes are computed in memory and never written to disk,
+and a decoded QR screenshot is deleted immediately after use. Codes are never
+logged.
+
+**What it protects against:** someone at your unlocked desktop reading your
+codes, or lifting a copy of the store — with a master password set the secrets
+are encrypted, and the panel refuses to generate codes while locked.
+
+**What it does not protect against:** an attacker who can already run code as
+your user. They can read the session key while it is open, attach to the shell,
+or read the keyring when no master password is set. There is no recovery path
+for a forgotten master password: resetting destroys the accounts. Marketplace
+listing is not a security review; this is a local convenience for a personal
+machine, not a hardened secrets manager.
 
 ## Uninstall
 
