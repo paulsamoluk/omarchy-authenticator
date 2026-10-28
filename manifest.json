@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "psamoluk.totp",
+  "name": "Authenticator",
+  "version": "1.0.0",
+  "author": "Paul Samoluk",
+  "license": "MIT",
+  "description": "TOTP two-factor codes generated locally from the login keyring, one click from the bar.",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Authenticator",
+    "description": "Two-factor (TOTP) codes in a popout, copied with a click",
+    "category": "Security",
+    "aliases": ["2fa", "totp", "authenticator", "otp", "mfa"],
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

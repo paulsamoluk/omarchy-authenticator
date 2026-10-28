@@ -1,0 +1,467 @@
+#!/usr/bin/env python3
+"""omarchy TOTP helper — the data layer behind the psamoluk.totp bar widget.
+
+Generates RFC 6238 codes locally. Nothing here talks to the network.
+
+Storage
+  ~/.local/share/psamoluk.totp/accounts.json  (0600) account metadata only
+  secrets in the login keyring via secret-tool (service "psamoluk.totp"),
+  falling back to the same 0600 file when no keyring backend answers.
+
+Commands
+  list [--json]                 current codes
+  add --label NAME [--issuer X] [--digits 6] [--period 30] [--algorithm SHA1]
+                                secret from --secret / OTP_SECRET / stdin ("-")
+  add-uri [otpauth://URI]       URI from OTP_URI env, argv, or stdin
+  remove NAME|--id ID
+  copy NAME|--id ID             copy the current code (paste-once)
+  check                         backend + account count
+"""
+
+import base64
+import hashlib
+import hmac
+import json
+import os
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.parse
+from pathlib import Path
+
+DATA_DIR = Path(os.environ.get("TOTP_DATA_DIR") or (Path.home() / ".local/share/psamoluk.totp"))
+INDEX = DATA_DIR / "accounts.json"
+SERVICE = "psamoluk.totp"
+KEYRING_LABEL = "omarchy-totp"
+
+ALGOS = {"SHA1": hashlib.sha1, "SHA256": hashlib.sha256, "SHA512": hashlib.sha512}
+
+
+# ---------------------------------------------------------------- storage ----
+
+
+def load_index():
+    try:
+        with INDEX.open() as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return {"version": 1, "backend": None, "accounts": []}
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"otp: cannot read {INDEX}: {exc}")
+    if isinstance(data, list):  # very old shape
+        data = {"version": 1, "backend": None, "accounts": data}
+    data.setdefault("version", 1)
+    data.setdefault("backend", None)
+    data.setdefault("accounts", [])
+    return data
+
+
+def save_index(data):
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(DATA_DIR, 0o700)
+    fd, tmp = tempfile.mkstemp(dir=str(DATA_DIR), prefix=".accounts.", suffix=".json")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            json.dump(data, fh, indent=2, sort_keys=True)
+            fh.write("\n")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, INDEX)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _secret_tool(*args, stdin=None):
+    return subprocess.run(
+        ["secret-tool", *args],
+        input=stdin,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+
+def keyring_available():
+    if not shutil.which("secret-tool"):
+        return False
+    try:
+        probe = _secret_tool("lookup", "service", SERVICE, "account", "__probe__")
+    except (OSError, subprocess.SubprocessError):
+        return False
+    # A missing item exits non-zero too; only a hard failure (no bus/keyring)
+    # produces stderr we care about.
+    err = (probe.stderr or "").lower()
+    return not any(word in err for word in ("cannot", "failed", "no such", "not found", "dbus"))
+
+
+def secret_for(account):
+    if account.get("store") == "file":
+        return account.get("secret")
+    try:
+        proc = _secret_tool("lookup", "service", SERVICE, "account", account["id"])
+    except (OSError, subprocess.SubprocessError):
+        # A locked keyring can stall the lookup; the widget must still get JSON.
+        return account.get("secret")
+    if proc.returncode == 0:
+        return proc.stdout.strip()
+    return account.get("secret")
+
+
+def secret_set(account, secret, data):
+    """Store the secret where the account says; drop the file copy if unused."""
+    if data.get("backend") == "keyring" and keyring_available():
+        proc = _secret_tool(
+            "store",
+            "--label",
+            f"{KEYRING_LABEL}: {account['label']}",
+            "service",
+            SERVICE,
+            "account",
+            account["id"],
+            stdin=secret + "\n",
+        )
+        if proc.returncode == 0:
+            account["store"] = "keyring"
+            account.pop("secret", None)
+            return True
+    account["store"] = "file"
+    account["secret"] = secret
+    return True
+
+
+def secret_del(account):
+    if account.get("store") == "keyring":
+        _secret_tool("clear", "service", SERVICE, "account", account["id"])
+    account.pop("secret", None)
+
+
+# ------------------------------------------------------------------- totp ----
+
+
+def normalize_secret(secret):
+    cleaned = "".join(ch for ch in (secret or "").upper() if ch.isalnum())
+    pad = (-len(cleaned)) % 8
+    return cleaned + "=" * pad
+
+
+def b32decode(secret):
+    raw = normalize_secret(secret)
+    try:
+        return base64.b32decode(raw, casefold=True)
+    except Exception as exc:  # noqa: BLE001 - surfaced to the user
+        raise SystemExit(f"otp: secret is not valid base32 ({exc})")
+
+
+def totp(secret, period=30, digits=6, algorithm="SHA1", at=None):
+    at = time.time() if at is None else at
+    period = int(period or 30)
+    digits = int(digits or 6)
+    algo = ALGOS[str(algorithm or "SHA1").upper()]
+    counter = int(at // period)
+    digest = hmac.new(b32decode(secret), counter.to_bytes(8, "big"), algo).digest()
+    offset = digest[-1] & 0x0F
+    value = (
+        (digest[offset] & 0x7F) << 24
+        | digest[offset + 1] << 16
+        | digest[offset + 2] << 8
+        | digest[offset + 3]
+    ) % (10 ** digits)
+    expires_at = (counter + 1) * period
+    return {
+        "code": str(value).zfill(digits),
+        "remaining": max(0, int(expires_at - at)),
+        "expires_at": int(expires_at),
+        "period": period,
+        "digits": digits,
+    }
+
+
+def code_for(account):
+    try:
+        secret = secret_for(account)
+    except Exception:  # noqa: BLE001 - never traceback into the panel
+        secret = None
+    if not secret:
+        return {"code": "", "remaining": 0, "expires_at": 0, "error": "secret unavailable"}
+    try:
+        return totp(
+            secret,
+            period=account.get("period", 30),
+            digits=account.get("digits", 6),
+            algorithm=account.get("algorithm", "SHA1"),
+        )
+    except SystemExit as exc:
+        return {"code": "", "remaining": 0, "expires_at": 0, "error": str(exc)}
+
+
+# --------------------------------------------------------------- accounts ----
+
+
+def find_account(data, name=None, ident=None):
+    for account in data["accounts"]:
+        if ident and account["id"] == ident:
+            return account
+    if name:
+        needle = name.strip().lower()
+        for account in data["accounts"]:
+            if account["label"].lower() == needle or account.get("issuer", "").lower() == needle:
+                return account
+    return None
+
+
+def slug(label, taken):
+    base = "".join(ch if ch.isalnum() else "-" for ch in label.lower()).strip("-") or "account"
+    while base in taken:
+        base += "2"
+    return base
+
+
+def add_account(data, label, issuer, secret, digits, period, algorithm):
+    label = (label or "").strip()
+    if not label:
+        raise SystemExit("otp: a label is required")
+    b32decode(secret)  # validate before storing anything
+    if find_account(data, name=label):
+        raise SystemExit(f"otp: an account labelled {label!r} already exists")
+    taken = {a["id"] for a in data["accounts"]}
+    account = {
+        "id": slug(label, taken),
+        "label": label,
+        "issuer": (issuer or "").strip(),
+        "digits": int(digits or 6),
+        "period": int(period or 30),
+        "algorithm": str(algorithm or "SHA1").upper(),
+    }
+    if data.get("backend") is None:
+        data["backend"] = "keyring" if keyring_available() else "file"
+    secret_set(account, secret.strip().replace(" ", ""), data)
+    data["accounts"].append(account)
+    save_index(data)
+    return account
+
+
+def parse_uri(uri):
+    uri = uri.strip()
+    if not uri.startswith("otpauth://"):
+        raise SystemExit("otp: expected an otpauth:// URI")
+    parsed = urllib.parse.urlparse(uri)
+    params = urllib.parse.parse_qs(parsed.query)
+    kind = parsed.netloc.lower()
+    if kind != "totp":
+        raise SystemExit(f"otp: only TOTP is supported (got {kind!r})")
+    path = urllib.parse.unquote(parsed.path.lstrip("/"))
+    issuer = (params.get("issuer", [""])[0] or "").strip()
+    if ":" in path:
+        prefix, _, account_name = path.partition(":")
+        issuer = issuer or prefix.strip()
+        path = account_name.strip()
+    secret = (params.get("secret", [""])[0] or "").strip()
+    if not secret:
+        raise SystemExit("otp: the URI carries no secret")
+    return {
+        "label": path or issuer or "account",
+        "issuer": issuer,
+        "secret": secret,
+        "digits": params.get("digits", ["6"])[0],
+        "period": params.get("period", ["30"])[0],
+        "algorithm": params.get("algorithm", ["SHA1"])[0],
+    }
+
+
+def read_stdin_or_env(env_key):
+    value = os.environ.get(env_key, "")
+    if value:
+        return value
+    if not sys.stdin.isatty():
+        return sys.stdin.read()
+    return ""
+
+
+# ------------------------------------------------------------------- cli -----
+
+
+def cmd_list(argv):
+    as_json = "--json" in argv
+    data = load_index()
+    rows = []
+    for account in data["accounts"]:
+        info = code_for(account)
+        rows.append(
+            {
+                "id": account["id"],
+                "label": account["label"],
+                "issuer": account.get("issuer", ""),
+                "digits": account.get("digits", 6),
+                "period": account.get("period", 30),
+                "store": account.get("store", "file"),
+                **info,
+            }
+        )
+    if as_json:
+        print(
+            json.dumps(
+                {
+                    "backend": data.get("backend") or "file",
+                    "accounts": rows,
+                    "now": int(time.time()),
+                }
+            )
+        )
+        return 0
+    if not rows:
+        print("no accounts — add one: omarchy-totp add --label GitHub")
+        return 0
+    for row in rows:
+        code = row["code"] or "------"
+        print(f"{row['label']:<28} {code:>8}  {row['remaining']:>2}s")
+    return 0
+
+
+def cmd_add(argv):
+    opts = {"digits": 6, "period": 30, "algorithm": "SHA1", "issuer": ""}
+    secret = ""
+    label = ""
+    rest = list(argv)
+    while rest:
+        flag = rest.pop(0)
+        if flag in ("--label", "-l") and rest:
+            label = rest.pop(0)
+        elif flag in ("--issuer", "-i") and rest:
+            opts["issuer"] = rest.pop(0)
+        elif flag in ("--secret", "-s") and rest:
+            secret = rest.pop(0)
+        elif flag == "--digits" and rest:
+            opts["digits"] = rest.pop(0)
+        elif flag == "--period" and rest:
+            opts["period"] = rest.pop(0)
+        elif flag == "--algorithm" and rest:
+            opts["algorithm"] = rest.pop(0)
+        else:
+            raise SystemExit(f"otp: unknown option {flag}")
+    if not secret or secret == "-":
+        secret = read_stdin_or_env("OTP_SECRET").strip()
+    data = load_index()
+    account = add_account(
+        data, label or opts["issuer"], opts["issuer"], secret,
+        opts["digits"], opts["period"], opts["algorithm"],
+    )
+    print(f"added {account['label']} ({account['id']}, {account['store']})")
+    return 0
+
+
+def cmd_add_uri(argv):
+    uri = argv[0] if argv and not argv[0].startswith("-") else ""
+    if not uri:
+        uri = read_stdin_or_env("OTP_URI").strip()
+    if not uri:
+        raise SystemExit("otp: no otpauth:// URI given")
+    parsed = parse_uri(uri)
+    data = load_index()
+    account = add_account(
+        data, parsed["label"], parsed["issuer"], parsed["secret"],
+        parsed["digits"], parsed["period"], parsed["algorithm"],
+    )
+    print(f"added {account['label']} ({account['id']}, {account['store']})")
+    return 0
+
+
+def cmd_remove(argv):
+    ident = None
+    name = None
+    rest = list(argv)
+    while rest:
+        flag = rest.pop(0)
+        if flag == "--id" and rest:
+            ident = rest.pop(0)
+        else:
+            name = flag
+    data = load_index()
+    account = find_account(data, name=name, ident=ident)
+    if not account:
+        raise SystemExit("otp: no such account")
+    secret_del(account)
+    data["accounts"] = [a for a in data["accounts"] if a["id"] != account["id"]]
+    save_index(data)
+    print(f"removed {account['label']}")
+    return 0
+
+
+def cmd_copy(argv):
+    ident = None
+    name = None
+    rest = list(argv)
+    while rest:
+        flag = rest.pop(0)
+        if flag == "--id" and rest:
+            ident = rest.pop(0)
+        else:
+            name = flag
+    data = load_index()
+    account = find_account(data, name=name, ident=ident)
+    if not account:
+        raise SystemExit("otp: no such account")
+    info = code_for(account)
+    code = info.get("code") or ""
+    if not code:
+        raise SystemExit(f"otp: {info.get('error') or 'no code'}")
+    if shutil.which("wl-copy"):
+        subprocess.run(["wl-copy"], input=code, text=True, check=False)
+        clear_after = os.environ.get("TOTP_CLIPBOARD_CLEAR", "60")
+        if clear_after.isdigit() and int(clear_after) > 0:
+            # Detached: clear the clipboard only if it still holds this code, so
+            # something copied afterwards is never thrown away. wl-copy's own
+            # --paste-once consumed the selection instead of handing it over.
+            script = "sleep {d}; [ \"$(wl-paste -n 2>/dev/null)\" = {c} ] && wl-copy --clear".format(
+                d=int(clear_after), c=shlex.quote(code)
+            )
+            subprocess.Popen(
+                ["sh", "-c", script],
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+            )
+    elif shutil.which("xclip"):
+        subprocess.run(["xclip", "-selection", "clipboard"], input=code, text=True, check=False)
+    print(code)
+    return 0
+
+
+def cmd_check(argv):
+    data = load_index()
+    backend = data.get("backend") or ("keyring" if keyring_available() else "file")
+    print(f"backend={backend} accounts={len(data['accounts'])} index={INDEX}")
+    return 0
+
+
+def main(argv):
+    if not argv:
+        print(__doc__)
+        return 2
+    command, rest = argv[0], argv[1:]
+    handlers = {
+        "list": cmd_list,
+        "add": cmd_add,
+        "add-uri": cmd_add_uri,
+        "remove": cmd_remove,
+        "copy": cmd_copy,
+        "check": cmd_check,
+    }
+    if command in ("-h", "--help", "help"):
+        print(__doc__)
+        return 0
+    handler = handlers.get(command)
+    if not handler:
+        print(f"otp: unknown command {command!r}", file=sys.stderr)
+        return 2
+    return handler(rest)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

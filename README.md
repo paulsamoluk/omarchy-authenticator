@@ -1,0 +1,124 @@
+# Authenticator — TOTP codes in the Omarchy bar
+
+A bar widget that generates your two-factor codes locally (RFC 6238 TOTP) and
+puts them one click from the bar: click the key, read the code, click it to copy.
+No phone, no cloud, no network.
+
+```
+  ⚿   ← bar widget            ┌───────────────────────────────────────────┐
+                              │  Authenticator                            │
+                              │  3 ACCOUNTS · LOGIN KEYRING               │
+                              │  CODES                        ⛭  + Add    │
+                              │  ┌─────────────────────────────────────┐  │
+                              │  │ GitHub                    123 456 ✕ │  │
+                              │  │ ▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇              │  │
+                              │  └─────────────────────────────────────┘  │
+                              │  Click to copy · M hides · Esc closes     │
+                              └───────────────────────────────────────────┘
+```
+
+## Install
+
+Local folder (already the case if you built it here):
+
+```bash
+omarchy plugin enable psamoluk.totp --section right
+omarchy restart shell
+```
+
+From the repository:
+
+```bash
+omarchy plugin add https://github.com/paulsamoluk/omarchy-authenticator --enable --yes
+```
+
+## Add an account
+
+**From the panel** — click the key, then `Add account`, and paste the
+`otpauth://` URI that sits next to a service's QR code:
+
+```
+otpauth://totp/GitHub:you@example.com?secret=JBSWY3DPEHPK3PXP&issuer=GitHub&period=30&digits=6
+```
+
+Almost every service hands that URI over as the QR code's text when you set up
+2FA (it is what the QR encodes). The panel sends it to the helper over **stdin**,
+so the secret never appears in a process argument list.
+
+**From the shell**, same thing:
+
+```bash
+~/.config/omarchy/plugins/psamoluk.totp/bin/otp add-uri 'otpauth://totp/...'
+~/.config/omarchy/plugins/psamoluk.totp/bin/otp add --label GitHub --issuer GitHub --secret JBSWY3DPEHPK3PXP
+~/.config/omarchy/plugins/psamoluk.totp/bin/otp list
+~/.config/omarchy/plugins/psamoluk.totp/bin/otp copy GitHub      # copies the current code
+~/.config/omarchy/plugins/psamoluk.totp/bin/otp remove GitHub
+```
+
+`--digits`, `--period` and `--algorithm` (SHA1/SHA256/SHA512) are accepted on
+`add`, and are read from the URI when using `add-uri`.
+
+Optionally put the helper on `PATH`:
+`ln -s ~/.config/omarchy/plugins/psamoluk.totp/bin/otp ~/.local/bin/otp`
+
+## Where the secrets live
+
+- **Login keyring by default** (`secret-tool`, service `psamoluk.totp`, one item
+  per account, labelled `omarchy-totp: <account>`). The item is cleared when you
+  remove the account.
+- `~/.local/share/psamoluk.totp/accounts.json` holds **metadata only** — labels,
+  issuer, digits, period, algorithm — `0600`, no secrets, no codes.
+- If no keyring backend answers (locked keyring, no D-Bus, no `secret-tool`), the
+  helper falls back to storing the secret in that same `0600` file and says so in
+  its output (`store: file`). Nothing is ever written world-readable.
+- Codes are computed on demand and never stored or logged.
+- Nothing here talks to the network, and nothing runs as root.
+
+## Keyboard
+
+| key | action |
+|---|---|
+| `↑` `↓` | move between codes |
+| `Enter` | copy the selected code |
+| `M` | hide/reveal codes (persisted) |
+| `A` | focus the add field |
+| `Esc` | close |
+
+Clicking a row copies it: the code goes to the clipboard and is cleared again
+after 60 s — but only if the clipboard still holds that code, so something you
+copied later is left alone. Set `TOTP_CLIPBOARD_CLEAR` to change the delay.
+
+## Widget settings
+
+Stored inline on the widget's `shell.json` entry:
+
+- `maskCodes` — start with codes hidden (toggle with `M` in the panel).
+- `showCountdown` — show the seconds left in the bar next to the key.
+
+## Requirements
+
+- `python3` (stdlib only), `secret-tool` (libsecret) for the keyring path,
+  `wl-copy`/`wl-paste` (wl-clipboard) for copy. All are optional except python3:
+  without `secret-tool` secrets go to the `0600` file; without `wl-copy` the
+  helper prints the code instead of copying it.
+- No services, no sudo, no network, no build step.
+
+## Uninstall
+
+```bash
+omarchy plugin remove psamoluk.totp --yes
+```
+
+Secrets live outside the plugin folder, so they survive the removal on purpose.
+To clear them too: remove each account first (`otp remove <label>`), or delete
+the keyring items by hand (`secret-tool clear service psamoluk.totp account <id>`)
+and `rm -rf ~/.local/share/psamoluk.totp`.
+
+## Verification note
+
+TOTP generation is checked against the RFC 6238 SHA-1, SHA-256 and SHA-512 test
+vectors (`94287082`/`46119246`/`90693936` at T=59) before any release.
+
+## License
+
+MIT — see `LICENSE`.
