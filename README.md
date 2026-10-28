@@ -50,6 +50,25 @@ omarchy plugin add https://github.com/paulsamoluk/omarchy-authenticator --enable
 The panel sends the credential to the helper over **stdin**, so the secret never
 appears in a process argument list.
 
+### From a QR screenshot
+
+Services hand out the same `otpauth://` URI as the QR code, so the QR can be the
+input: copy the screenshot, open `Add account`, and press the **⧉ button** in
+that card — the helper pipes the clipboard image through `zbarimg`, reads the
+URI out of the QR and adds the account. A screenshot of a whole page works too
+(the QR does not have to be cropped to size).
+
+Pasting the **path** of an image (`~/Pictures/qr.png`, `.png/.jpg/.webp`) into
+the field and pressing Add does the same thing. Either way the temporary copy of
+the image is deleted straight after decoding — it contains the secret.
+
+From the shell:
+
+```bash
+otp add-qr ~/Pictures/screenshot.png   # a file
+otp add-qr --clipboard                 # whatever image is on the clipboard
+```
+
 **From the shell**, same thing:
 
 ```bash
@@ -144,9 +163,10 @@ Stored inline on the widget's `shell.json` entry:
 ## Requirements
 
 - `python3` (stdlib only), `secret-tool` (libsecret) for the keyring path,
-  `wl-copy`/`wl-paste` (wl-clipboard) for copy. All are optional except python3:
-  without `secret-tool` secrets go to the `0600` file; without `wl-copy` the
-  helper prints the code instead of copying it.
+  `wl-copy`/`wl-paste` (wl-clipboard) for copy, `zbarimg` (`zbar`) for reading a
+  QR screenshot. All are optional except python3: without `secret-tool` secrets
+  go to the `0600` file; without `wl-copy` the helper prints the code instead of
+  copying it; without `zbar` the QR button explains what to install.
 - No services, no sudo, no network, no build step.
 
 ## Uninstall

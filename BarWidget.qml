@@ -122,6 +122,24 @@ BarWidget {
 
   // A bare base32 secret (what Google/Microsoft setup pages print next to the
   // QR code) with a label the user types. The secret still travels on stdin.
+  // The QR on a service's setup page is the same otpauth:// URI: decode it
+  // straight from a screenshot on the clipboard, or from a file path.
+  function addFromClipboard() {
+    if (needsUnlock) return false
+    qrProc.command = [helperPath, "add-qr", "--clipboard"]
+    qrProc.running = true
+    return true
+  }
+
+  function addFromFile(path) {
+    if (needsUnlock) return false
+    var file = String(path || "").trim()
+    if (file === "") return false
+    qrProc.command = [helperPath, "add-qr", file]
+    qrProc.running = true
+    return true
+  }
+
   function addSecret(label, secret) {
     var name = String(label || "").trim()
     var key = String(secret || "").replace(/\s+/g, "")
@@ -305,6 +323,20 @@ BarWidget {
 
   property string addError: ""
   property bool addSucceeded: false
+
+  Process {
+    id: qrProc
+    stderr: StdioCollector {
+      waitForEnd: true
+      property string message: ""
+      onStreamFinished: message = String(text || "").trim()
+    }
+    onExited: {
+      root.addError = qrProc.stderr.message
+      root.addSucceeded = exitCode === 0
+      root.refresh()
+    }
+  }
 
   // Five ticks a second is arithmetic only (the ring reads the clock); the
   // helper itself runs once per code period, when a countdown hits zero.

@@ -102,6 +102,15 @@ Panel {
     notice = "Copied " + account.label + " — clipboard clears in 60 s"
   }
 
+  function scanClipboard() {
+    if (root.locked) {
+      notice = "Unlock first."
+      return
+    }
+    notice = ""
+    if (host && host.addFromClipboard && host.addFromClipboard()) notice = "Reading the QR code…"
+  }
+
   function submitUnlock() {
     if (!host || !host.unlock) return
     host.unlock(unlockField.text)
@@ -144,6 +153,18 @@ Panel {
     var text = draft()
     if (text === "") {
       notice = "Paste an otpauth:// URI, or the secret and a name."
+      return
+    }
+    if (/^(\/|~\/).*\.(png|jpe?g|webp)$/i.test(text)) {
+      if (root.locked) {
+        notice = "Unlock first."
+        return
+      }
+      notice = ""
+      if (host && host.addFromFile && host.addFromFile(text)) {
+        notice = "Reading the QR code…"
+        uriField.text = ""
+      }
       return
     }
     notice = "Adding…"
@@ -557,7 +578,7 @@ Panel {
 
               TextField {
                 id: uriField
-                width: parent.width - addButton.width - parent.spacing
+                width: parent.width - addButton.width - qrButton.width - parent.spacing * 2
                 height: Style.space(30)
                 foreground: root.barForeground
                 selectByMouse: true
@@ -578,13 +599,22 @@ Panel {
                 bordered: true
                 onClicked: root.submitAdd()
               }
+
+              PanelActionButton {
+                id: qrButton
+                iconText: "\uF029"
+                foreground: root.barForeground
+                fontSize: Style.font.body
+                tooltipText: "Read a QR screenshot from the clipboard"
+                onClicked: root.scanClipboard()
+              }
             }
 
             Text {
               width: parent.width
               visible: root.count === 0
               wrapMode: Text.WordWrap
-              text: "Paste the otpauth:// URI from the service's QR code, or just the base32 secret and a name. The secret goes to your login keyring — never into this widget's files."
+              text: "Paste the otpauth:// URI from the service's QR code, or just the base32 secret and a name. Have a screenshot of the QR instead? Copy the image, then press the ⧉ button — or paste the image's path here. Either way the secret goes to your login keyring, never into this widget's files."
               color: Util.alpha(root.barForeground, 0.55)
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption

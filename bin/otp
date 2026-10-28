@@ -13,6 +13,7 @@ Commands
   add --label NAME [--issuer X] [--digits 6] [--period 30] [--algorithm SHA1]
                                 secret from --secret / OTP_SECRET / stdin ("-")
   add-uri [otpauth://URI]       URI from OTP_URI env, argv, or stdin
+  add-qr [PATH|--clipboard]     read the otpauth:// URI out of a QR screenshot
   remove NAME|--id ID
   copy NAME|--id ID             copy the current code (60 s auto-clear)
   lock status|set|verify|clear  master password gate (password on stdin)
@@ -311,6 +312,60 @@ def parse_uri(uri):
     }
 
 
+def qr_payload(path):
+    """Decode the otpauth:// payload out of a QR image with zbar."""
+    if not shutil.which("zbarimg"):
+        raise SystemExit("otp: zbarimg is not installed (pacman -S zbar)")
+    try:
+        proc = subprocess.run(
+            ["zbarimg", "--quiet", "--raw", path],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise SystemExit(f"otp: could not read the image ({exc})")
+    for line in (proc.stdout or "").splitlines():
+        line = line.strip()
+        if line.startswith("otpauth://"):
+            return line
+    raise SystemExit("otp: no otpauth:// QR code in that image")
+
+
+def clipboard_image(suffix_png=b"\x89PNG\r\n\x1a\n"):
+    """Write whatever image is on the Wayland clipboard to a temp file."""
+    if not shutil.which("wl-paste"):
+        raise SystemExit("otp: wl-paste is not installed (wl-clipboard)")
+    for mime, ext in (
+        ("image/png", ".png"),
+        ("image/jpeg", ".jpg"),
+        ("image/webp", ".webp"),
+    ):
+        try:
+            listed = subprocess.run(
+                ["wl-paste", "--list-types"], capture_output=True, text=True, timeout=5
+            )
+        except subprocess.SubprocessError:
+            raise SystemExit("otp: the clipboard did not answer")
+        if mime not in (listed.stdout or ""):
+            continue
+        try:
+            data = subprocess.run(
+                ["wl-paste", "--type", mime], capture_output=True, timeout=15
+            ).stdout
+        except subprocess.SubprocessError:
+            raise SystemExit("otp: reading the clipboard timed out")
+        if not data:
+            continue
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        os.chmod(DATA_DIR, 0o700)
+        fd, path = tempfile.mkstemp(dir=str(DATA_DIR), prefix=".qr.", suffix=ext)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        return path
+    raise SystemExit("otp: no image on the clipboard")
+
+
 def read_stdin_or_env(env_key):
     value = os.environ.get(env_key, "")
     if value:
@@ -401,6 +456,43 @@ def cmd_add_uri(argv):
     if not uri:
         raise SystemExit("otp: no otpauth:// URI given")
     parsed = parse_uri(uri)
+    data = load_index()
+    account = add_account(
+        data, parsed["label"], parsed["issuer"], parsed["secret"],
+        parsed["digits"], parsed["period"], parsed["algorithm"],
+    )
+    print(f"added {account['label']} ({account['id']}, {account['store']})")
+    return 0
+
+
+def cmd_add_qr(argv):
+    """Add an account from a QR screenshot: a file path, or the clipboard."""
+    source = ""
+    use_clipboard = False
+    for flag in argv:
+        if flag in ("--clipboard", "-c"):
+            use_clipboard = True
+        elif not source:
+            source = flag
+
+    tmp = ""
+    try:
+        if use_clipboard or source in ("", "-"):
+            tmp = clipboard_image()
+            path = tmp
+        else:
+            path = os.path.expanduser(source)
+            if not os.path.exists(path):
+                raise SystemExit(f"otp: no such image: {source}")
+        parsed = parse_uri(qr_payload(path))
+    finally:
+        if tmp:
+            # The screenshot holds the secret; never leave a copy behind.
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
     data = load_index()
     account = add_account(
         data, parsed["label"], parsed["issuer"], parsed["secret"],
@@ -555,6 +647,7 @@ def main(argv):
         "list": cmd_list,
         "add": cmd_add,
         "add-uri": cmd_add_uri,
+        "add-qr": cmd_add_qr,
         "remove": cmd_remove,
         "copy": cmd_copy,
         "check": cmd_check,
