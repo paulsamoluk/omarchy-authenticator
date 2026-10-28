@@ -34,16 +34,21 @@ omarchy plugin add https://github.com/paulsamoluk/omarchy-authenticator --enable
 
 ## Add an account
 
-**From the panel** — click the key, then `Add account`, and paste the
-`otpauth://` URI that sits next to a service's QR code:
+**From the panel** — click the key, then `Add account`, and paste either form:
 
-```
-otpauth://totp/GitHub:you@example.com?secret=JBSWY3DPEHPK3PXP&issuer=GitHub&period=30&digits=6
-```
+- the `otpauth://` URI that sits next to a service's QR code:
 
-Almost every service hands that URI over as the QR code's text when you set up
-2FA (it is what the QR encodes). The panel sends it to the helper over **stdin**,
-so the secret never appears in a process argument list.
+  ```
+  otpauth://totp/GitHub:you@example.com?secret=JBSWY3DPEHPK3PXP&issuer=GitHub&period=30&digits=6
+  ```
+
+- or, when the setup page only prints the key in text, the **bare base32 secret**
+  plus a name for the account (`JBSWY3DPEHPK3PXP`). Spaces and lower case are
+  fine. Bare secrets are added with the defaults services use: 6 digits,
+  30-second period, SHA-1.
+
+The panel sends the credential to the helper over **stdin**, so the secret never
+appears in a process argument list.
 
 **From the shell**, same thing:
 

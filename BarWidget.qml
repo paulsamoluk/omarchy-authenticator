@@ -106,6 +106,18 @@ BarWidget {
     return true
   }
 
+  // A bare base32 secret (what Google/Microsoft setup pages print next to the
+  // QR code) with a label the user types. The secret still travels on stdin.
+  function addSecret(label, secret) {
+    var name = String(label || "").trim()
+    var key = String(secret || "").replace(/\s+/g, "")
+    if (name === "" || key === "") return false
+    addProc.command = [helperPath, "add", "--label", name]
+    addProc.inputText = key
+    addProc.running = true
+    return true
+  }
+
   Process {
     id: listProc
     stdout: StdioCollector {

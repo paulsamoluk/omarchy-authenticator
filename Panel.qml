@@ -39,6 +39,15 @@ Panel {
     return Model.spaced(account.code)
   }
 
+  function draft() { return String(uriField.text || "").trim() }
+
+  function looksLikeUri(text) { return text.indexOf("otpauth://") === 0 }
+
+  // Setup pages print the key as base32 next to the QR code; accept that too.
+  function looksLikeSecret(text) { return /^[A-Za-z2-7][A-Za-z2-7\s=-]{15,}$/.test(text) }
+
+  readonly property bool labelNeeded: draft() !== "" && !looksLikeUri(draft())
+
   function moveCursor(delta) {
     if (count === 0) return
     var next = Math.max(0, Math.min(count - 1, cursorIndex + delta))
@@ -75,18 +84,30 @@ Panel {
   }
 
   function submitAdd() {
-    var uri = String(uriField.text || "").trim()
-    if (uri === "") {
-      notice = "Paste an otpauth:// URI first."
-      return
-    }
-    if (uri.indexOf("otpauth://") !== 0) {
-      notice = "That does not look like an otpauth:// URI."
+    var text = draft()
+    if (text === "") {
+      notice = "Paste an otpauth:// URI, or the secret and a name."
       return
     }
     notice = ""
-    if (host && host.addUri) host.addUri(uri)
+    if (looksLikeUri(text)) {
+      if (host && host.addUri) host.addUri(text)
+      uriField.text = ""
+      return
+    }
+    if (!looksLikeSecret(text)) {
+      notice = "That is neither an otpauth:// URI nor a base32 secret."
+      return
+    }
+    var name = String(labelField.text || "").trim()
+    if (name === "") {
+      notice = "Name this account first."
+      Qt.callLater(function() { labelField.forceActiveFocus() })
+      return
+    }
+    if (host && host.addSecret) host.addSecret(name, text)
     uriField.text = ""
+    labelField.text = ""
   }
 
   onOpenedChanged: {
@@ -197,31 +218,56 @@ Panel {
         }
 
         // ------------------------------ add row ------------------------------
-        Row {
+        Column {
           width: parent.width
           visible: root.showAdd || root.count === 0
-          spacing: Style.space(8)
+          spacing: Style.space(6)
 
-          TextField {
-            id: uriField
-            width: parent.width - addButton.width - parent.spacing
-            height: Style.space(30)
-            foreground: root.barForeground
-            selectByMouse: true
-            placeholderText: "otpauth://totp/Issuer:you?secret=…  (paste from the service)"
-            onAccepted: root.submitAdd()
-            onTextEdited: if (root.notice !== "") root.notice = ""
-            Keys.onEscapePressed: keyCatcher.forceActiveFocus()
+          Row {
+            width: parent.width
+            spacing: Style.space(8)
+            visible: root.labelNeeded
+
+            TextField {
+              id: labelField
+              width: parent.width
+              height: Style.space(30)
+              foreground: root.barForeground
+              selectByMouse: true
+              placeholderText: "Name this account (e.g. GitHub)"
+              onAccepted: root.submitAdd()
+              onTextEdited: if (root.notice !== "") root.notice = ""
+              Keys.onEscapePressed: keyCatcher.forceActiveFocus()
+            }
           }
 
-          Button {
-            id: addButton
-            text: "Add"
-            fontFamily: root.fontFamily
-            fontSize: Style.font.body
-            foreground: root.barForeground
-            bordered: true
-            onClicked: root.submitAdd()
+          Row {
+            width: parent.width
+            spacing: Style.space(8)
+
+            TextField {
+              id: uriField
+              width: parent.width - addButton.width - parent.spacing
+              height: Style.space(30)
+              foreground: root.barForeground
+              selectByMouse: true
+              placeholderText: root.labelNeeded
+                ? "paste the base32 secret"
+                : "otpauth://totp/Issuer:you?secret=…  (or just the secret)"
+              onAccepted: root.submitAdd()
+              onTextEdited: if (root.notice !== "") root.notice = ""
+              Keys.onEscapePressed: keyCatcher.forceActiveFocus()
+            }
+
+            Button {
+              id: addButton
+              text: "Add"
+              fontFamily: root.fontFamily
+              fontSize: Style.font.body
+              foreground: root.barForeground
+              bordered: true
+              onClicked: root.submitAdd()
+            }
           }
         }
 
@@ -229,7 +275,7 @@ Panel {
           width: parent.width
           visible: root.count === 0
           wrapMode: Text.WordWrap
-          text: "No accounts yet. Paste the otpauth:// URI your service shows next to its QR code — the secret is stored in your login keyring, never in the widget's files."
+          text: "No accounts yet. Paste the otpauth:// URI your service shows next to its QR code, or just the base32 secret and a name — the secret is stored in your login keyring, never in the widget's files."
           color: Util.alpha(root.barForeground, 0.62)
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
