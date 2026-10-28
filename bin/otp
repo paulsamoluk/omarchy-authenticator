@@ -279,7 +279,9 @@ def read_stdin_or_env(env_key):
     if value:
         return value
     if not sys.stdin.isatty():
-        return sys.stdin.read()
+        # One line, not read-to-EOF: the widget's Process writes the value and
+        # never closes the pipe, so read() would block the panel forever.
+        return sys.stdin.readline()
     return ""
 
 
