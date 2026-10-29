@@ -30,7 +30,6 @@ import hashlib
 import hmac
 import json
 import os
-import shlex
 import shutil
 import subprocess
 import sys
@@ -624,9 +623,9 @@ def cmd_add(argv):
 
 
 def cmd_add_uri(argv):
-    uri = argv[0] if argv and not argv[0].startswith("-") else ""
-    if not uri:
-        uri = read_stdin_or_env("OTP_URI").strip()
+    if argv and not argv[0].startswith("-"):
+        raise SystemExit("otp: pass the URI on stdin, not as an argument — argv is world-readable")
+    uri = read_stdin_or_env("OTP_URI").strip()
     if not uri:
         raise SystemExit("otp: no otpauth:// URI given")
     parsed = parse_uri(uri)
@@ -719,22 +718,57 @@ def cmd_copy(argv):
         subprocess.run(["wl-copy"], input=code, text=True, check=False)
         clear_after = os.environ.get("TOTP_CLIPBOARD_CLEAR", "60")
         if clear_after.isdigit() and int(clear_after) > 0:
-            # Detached: clear the clipboard only if it still holds this code, so
-            # something copied afterwards is never thrown away. wl-copy's own
-            # --paste-once consumed the selection instead of handing it over.
-            script = "sleep {d}; [ \"$(wl-paste -n 2>/dev/null)\" = {c} ] && wl-copy --clear".format(
-                d=int(clear_after), c=shlex.quote(code)
-            )
-            subprocess.Popen(
-                ["sh", "-c", script],
-                start_new_session=True,
+            # Detached, but the expected value travels on stdin: a `sh -c` with
+            # the code in its argument list would publish a live OTP to every
+            # local user via /proc/<pid>/cmdline for the whole timeout.
+            helper = subprocess.Popen(
+                [sys.executable, os.path.realpath(__file__), "_clipclear", str(int(clear_after))],
+                stdin=subprocess.PIPE,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+                text=True,
             )
+            try:
+                helper.stdin.write(code + "\n")
+                helper.stdin.close()
+            except OSError:
+                pass
     elif shutil.which("xclip"):
         subprocess.run(["xclip", "-selection", "clipboard"], input=code, text=True, check=False)
     print(code)
+    return 0
+
+
+def cmd_clipclear(argv):
+    """Internal: clear the clipboard after a delay, expected value on stdin.
+
+    Kept in a process of its own so the copy can return immediately. The value
+    never enters argv, and the clipboard is only cleared when it still holds
+    exactly that value — something copied afterwards is left alone.
+    """
+    try:
+        seconds = int(argv[0]) if argv else 60
+    except ValueError:
+        seconds = 60
+    expected = ""
+    if not sys.stdin.isatty():
+        expected = sys.stdin.readline().rstrip("\r\n")
+    if not expected:
+        return 0
+    time.sleep(max(0, seconds))
+    if not shutil.which("wl-paste") or not shutil.which("wl-copy"):
+        return 0
+    try:
+        current = subprocess.run(["wl-paste", "-n"], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return 0
+    if current.returncode != 0 or current.stdout.rstrip("\r\n") != expected:
+        return 0
+    try:
+        subprocess.run(["wl-copy", "--clear"], capture_output=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        pass
     return 0
 
 
@@ -863,6 +897,7 @@ def main(argv):
         "copy": cmd_copy,
         "check": cmd_check,
         "lock": cmd_lock,
+        "_clipclear": cmd_clipclear,
     }
     if command in ("-h", "--help", "help"):
         print(__doc__)

@@ -84,10 +84,10 @@ $OTP copy GitHub                                  # copies the current code
 $OTP remove GitHub
 ```
 
-Secrets and master passwords are only ever read from **stdin**: `--secret` is
-refused outright, because an argument is visible in `ps` for the life of the
-process. Passing a URI as an argument to `add-uri` still works for convenience,
-with that caveat.
+Secrets, master passwords and `otpauth://` URIs are only ever read from
+**stdin**: `--secret` and a URI on argv are refused outright, because another
+local user can read a process's arguments out of `/proc` while it lives and
+replay a live code.
 
 `--digits`, `--period` and `--algorithm` (SHA1/SHA256/SHA512) are accepted on
 `add`, and are read from the URI when using `add-uri`.
@@ -169,6 +169,13 @@ Clicking a row copies it: the code goes to the clipboard and is cleared again
 after 60 s — but only if the clipboard still holds that code, so something you
 copied later is left alone. Set `TOTP_CLIPBOARD_CLEAR` to change the delay.
 
+The countdown to that clear runs in a small detached helper that receives the
+expected value **on stdin**; it exists only in that process's memory, never in
+its argument list, so the live code cannot be read out of `/proc` by another
+local user. `tests/no-argv-leak.sh` asserts exactly that: it scans every
+process's command line for the copied code for the whole timeout, and fails if
+it finds one.
+
 ## Widget settings
 
 Stored inline on the widget's `shell.json` entry:
@@ -201,7 +208,7 @@ AES-256, 0600); the session key in `$XDG_RUNTIME_DIR/psamoluk.totp/session`
 no master password is set; and the clipboard, when you click a code. It never
 writes to your Omarchy configuration.
 
-**Secret handling:** every secret and password reaches the helper on stdin —
+**Secret handling:** every secret, password and URI reaches the helper on stdin —
 `--secret` is rejected, codes are computed in memory and never written to disk,
 and a decoded QR screenshot is deleted immediately after use. Codes are never
 logged.
