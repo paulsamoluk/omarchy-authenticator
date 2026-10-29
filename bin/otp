@@ -476,7 +476,7 @@ def parse_uri(uri):
 def qr_payload(path):
     """Decode the otpauth:// payload out of a QR image with zbar."""
     if not shutil.which("zbarimg"):
-        raise SystemExit("otp: zbarimg is not installed (pacman -S zbar)")
+        raise SystemExit("otp: zbarimg is not installed — the 'zbar' package provides it, and it is only needed to read a QR screenshot")
     try:
         if os.path.getsize(path) > 20 * 1024 * 1024:
             raise SystemExit("otp: that image is too large to be a QR screenshot")
